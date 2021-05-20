@@ -27,3 +27,12 @@ images:
   sourceRepository: github.com/metallb/metallb
   repository: quay.io/metallb/speaker
   tag: v0.9.5
+- name: rook-ceph
+  sourceRepository: github.com/rook/rook
+  repository: rook/ceph
+  # Equinix Metal runs rook v1.4.4 and ceph v15.2.4 in production
+  tag: v1.4.4
+- name: ceph
+  sourceRepository: github.com/rook/rook
+  repository: ceph/ceph
+  tag: v15.2.4

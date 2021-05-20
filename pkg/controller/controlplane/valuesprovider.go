@@ -18,6 +18,7 @@ import (
 	"context"
 	"path/filepath"
 
+	apispacket "github.com/gardener/gardener-extension-provider-packet/pkg/apis/packet"
 	"github.com/gardener/gardener-extension-provider-packet/pkg/packet"
 	extensionscontroller "github.com/gardener/gardener/extensions/pkg/controller"
 	"github.com/gardener/gardener/extensions/pkg/controller/controlplane/genericactuator"
@@ -94,6 +95,11 @@ var controlPlaneShootChart = &chart.Chart{
 			Images:  []string{packet.MetalLBControllerImageName, packet.MetalLBSpeakerImageName},
 			Objects: []*chart.Object{},
 		},
+		{
+			Name:    "rook-ceph",
+			Images:  []string{packet.RookCephImageName},
+			Objects: []*chart.Object{},
+		},
 	},
 }
 
@@ -145,7 +151,7 @@ func (vp *valuesProvider) GetControlPlaneShootChartValues(
 	}
 
 	// Get control plane shoot chart values
-	return getControlPlaneShootChartValues(cluster, credentials)
+	return vp.getControlPlaneShootChartValues(cp, cluster, credentials)
 }
 
 // getCredentials determines the credentials from the secret referenced in the ControlPlane resource.
@@ -164,7 +170,7 @@ func (vp *valuesProvider) getCredentials(
 	return credentials, nil
 }
 
-// getCCMChartValues collects and returns the CCM chart values.
+// getControlPlaneChartValues collects and returns the control plane chart values.
 func getControlPlaneChartValues(
 	cp *extensionsv1alpha1.ControlPlane,
 	cluster *extensionscontroller.Cluster,
@@ -183,17 +189,44 @@ func getControlPlaneChartValues(
 			},
 			"facility": cluster.Shoot.Spec.Region,
 		},
-		"metallb": map[string]interface{}{},
+		"metallb":   map[string]interface{}{},
+		"rook-ceph": map[string]interface{}{},
 	}
 
 	return values, nil
 }
 
 // getControlPlaneShootChartValues collects and returns the control plane shoot chart values.
-func getControlPlaneShootChartValues(
+func (vp *valuesProvider) getControlPlaneShootChartValues(
+	cp *extensionsv1alpha1.ControlPlane,
 	cluster *extensionscontroller.Cluster,
 	credentials *packet.Credentials,
 ) (map[string]interface{}, error) {
 
-	return map[string]interface{}{}, nil
+	cpConfig, err := vp.decodeControlPlaneConfig(cp)
+	if err != nil {
+		return nil, errors.Wrapf(err, "decoding control plane config")
+	}
+
+	values := map[string]interface{}{
+		"rook-ceph": map[string]interface{}{
+			"enabled": cpConfig.Persistence != nil && *cpConfig.Persistence.Enabled,
+		},
+	}
+
+	return values, nil
+}
+
+func (vp *valuesProvider) decodeControlPlaneConfig(cp *extensionsv1alpha1.ControlPlane) (*apispacket.ControlPlaneConfig, error) {
+	cpConfig := &apispacket.ControlPlaneConfig{}
+
+	if cp.Spec.ProviderConfig == nil {
+		return cpConfig, nil
+	}
+
+	if _, _, err := vp.Decoder().Decode(cp.Spec.ProviderConfig.Raw, nil, cpConfig); err != nil {
+		return nil, errors.Wrapf(err, "decoding '%s'", kutil.ObjectName(cp))
+	}
+
+	return cpConfig, nil
 }
