@@ -27,6 +27,8 @@ spec:
           version: "20.04"
   kubernetes:
     version: 1.19.7
+    kubelet:
+      failSwapOn: false
   networking:
     type: calico
     #nodes: 10.250.0.0/16

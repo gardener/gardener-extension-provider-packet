@@ -31,15 +31,14 @@ order to provide necessary services to Packet seed and shoot clusters.
 two **distinct** kinds of API servers, both of which are accessed via `kubectl` using
 a `kubeconfig` file
 
-* The "base cluster", the pre-existing normal Kubernetes cluster on which Gardener is installed, turning it into the "garden cluster"
-* The "Gardener API server", a special k8s API server which doesn't have any nodes or pods and
-which deals with Gardener resources only, and runs on top of the "base cluster"
+* The "soil cluster", the pre-existing normal Kubernetes cluster on which Gardener is installed, turning it into the "soil cluster"
+* The "garden cluster", a special k8s API server which doesn't have any nodes or pods and which deals with Gardener resources only, and runs on top of the "soil cluster"
 
-The `kubeconfig` for the "base cluster" is wherever you set it when creating the initial Kubernetes
+The `kubeconfig` for the "soil cluster" is wherever you set it when creating the initial Kubernetes
 cluster, for example during [garden-setup](https://github.com/gardener/garden-setup). If you used
 the standard `garden-setup` flow, then the `kubeconfig` is likely at `$GOPATH/src/github.com/gardener/sow/landscape/kubeconfig`.
 
-The `kubeconfig` for the "Gardener API server", when using [garden-setup](https://github.com/gardener/garden-setup)
+The `kubeconfig` for the "garden cluster", when using [garden-setup](https://github.com/gardener/garden-setup)
 is at `$GOPATH/src/github.com/gardener/sow/landscape/export/kube-apiserver/kubeconfig`.
 
 ## Development workflow
@@ -53,13 +52,13 @@ In general, you will do these once, although if you are changing how the extensi
 e.g. the `CloudProfile` or `Shoot`, you may modify and redeploy them multiple times.
 
 1. Deploy your base cluster
-1. Convert your base cluster into a garden cluster
-1. Deploy a seed to your "gardener API server"
-1. Deploy a project to your "gardener API server"
+1. Convert your base cluster into a soil cluster, thus creating a garden cluster
+1. Deploy a seed to your garden cluster
+1. Deploy a project to your garden cluster
 1. Get an Equinix Metal API key and project ID, and save them to the secret file, which also contains the secret binding
-1. Deploy the secret and secret binding to the garden cluster
-1. Configure and deploy a cloud profile to the garden cluster
-1. Configure and deploy a shoot to the garden cluster
+1. Deploy the secret and secret binding to the soil cluster
+1. Configure and deploy a cloud profile to the soil cluster
+1. Configure and deploy a shoot to the soil cluster
 
 #### Base Cluster and Garden Cluster
 
@@ -156,17 +155,31 @@ The `Shoot` resource is long and complex, and beyond the scope of this document.
 
 ### Extension
 
-With the setup in place, you can run your local extension against the cluster.
+With the setup in place, you can run your local extension against the soil cluster.
 
-1. Get the namespace in which your extensions are running; see below
-1. Determine the port on which the hook will be listening; see below.
-1. Run the webhook: `./hack/hook-me.sh <namespace> <port>`, where `<namespace>` and `<port>` are as determined above
-1. Run the extension locally: `make start`
+The extension actually is made up of two components, although they start as one. Both use the provided `KUBECONFIG` to connect to the
+API server of the "base cluster", but their behaviours diverge from there.
 
-You need the webhook so that the "gardener server" can communicate with your locally running extension.
+* A kubernetes controller, which registers and listens for events; the entire connection is initiated as a client.
+* A kubernetes [mutating webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/), which registers an http endpoint to which the `kube-apiserver` sends events. Each event requires a new connection initiated by the `kube-apiserver`
 
-`<namespace>` is the namespace that the extension is running in on the "base cluster". _After_ you deployed the shoot,
-connect to the "base cluster" in which the seed is running, and do `kubectl get ns`; the target namespace should have
+If your locally running extension does not have an IP address accessible to the `kube-apiserver`, you need some way to
+open a tunnel for it. This is the job of `hook-me.sh`. `hook-me.sh` starts an [inlets tunnel](http://inlets.dev) to
+connect to your IP.
+
+Steps:
+
+1. Get the namespace in which your extensions are running
+1. Determine the port on which the hook will be listening
+1. Determine the port on which inlets is listening
+1. Determine the port on which the extension service `gardener-extension-provider-packet` is listening
+1. Run the extension locally: `make start <options>`
+1. Run the webhook tunnel: `./hack/hook-me.sh <provider> <namespace> <webhook port> <inlets port>`, where `<namespace>`, `<port>` and `<inlets port>` are as determined above, and `<provider>` is `packet`
+
+#### Namespace
+
+`<namespace>` is the namespace that the extension is running in on the "soil cluster". _After_ you deployed the shoot,
+connect to the "soil cluster" in which the seed is running, and do `kubectl get ns`; the target namespace should have
 your provider name in it.
 
 For example:
@@ -188,17 +201,173 @@ kube-system                         Active   64d
 shoot--em--em-test                  Active   6d21h
 ```
 
-In this case, it is `extension-provider-packet-9r7xh`.
+In this example, it is `extension-provider-packet-9r7xh`.
 
-`<port>` is the port on which the provider is listening. By default, it is `8443`, but it is set in the `Makefile` as `WEBHOOK_CONFIG_PORT`.
+#### Webhook Port
 
-Combining the above, we get:
+`<webhook port>` is the port on which the provider extension webhook component is listening. By default, it is `8443`,
+but you can set it to anything you want.
 
-```sh
-./hack/hook-me.sh extension-provider-packet-9r7xh 8443
+
+it is set in the `Makefile` as `WEBHOOK_CONFIG_PORT`.
+
+#### Inlets Port
+
+`<inlets port>` is the port on which inlets is listening. The garden kube-apiserver uses the service `gardener-extension-provider-packet`
+to connect to the webhook. The `targetPort` of that service must point either to:
+
+* the in-cluster pod where the extension is running
+* the in-cluster pod where inlets is listening, normally `inlets-server`
+
+Because the `gardener-extension-provider-packet` service is deployed and syncs every 5 minutes, changing the `targetPort`
+on this service to match the port on which `inlets-server` is listening will only last a few minutes.
+
+Thus, you want the `inlets-server` listening port to match up to the `targetPort` of `gardener-extension-provider-packet`
+
+The `gardener-extension-provider-packet` port is set in [values.yaml](./charts/gardener-extension-provider-packet/values.yaml#L45),
+by default 10250, and the inlets port is set as the last argument to `hook-me.sh`.
+
+#### Extension Service Port
+
+The shoot kube-apiserver will be pointed to the `gardener-extension-provider-packet` Service, which, in turn, as described above, points
+to the inlets pod. Thus, the apiserver must be told which port it already is listening on. In general, that is `443`, but you
+can check it via `kubectl -n <namespace> describe svc gardener-extension-provider-packet` in the soil cluster, for example:
+
+```
+$ kubectl -n extension-provider-packet-9r7xh describe svc gardener-extension-provider-packet
+Name:              gardener-extension-provider-packet
+Namespace:         extension-provider-packet-9r7xh
+Labels:            app=gardener-extension-provider-packet
+                   app.kubernetes.io/instance=provider-packet
+                   app.kubernetes.io/name=gardener-extension-provider-packet
+Annotations:       cloud.google.com/neg: {"ingress":true}
+                   resources.gardener.cloud/description:
+                     DO NOT EDIT - This resource is managed by gardener-resource-manager.
+                     Any modifications are discarded and the resource is returned to the original state.
+Selector:          app.kubernetes.io/instance=provider-packet,app.kubernetes.io/name=gardener-extension-provider-packet
+Type:              ClusterIP
+IP Families:       <none>
+IP:                10.80.2.212
+IPs:               <none>
+Port:              <unset>  443/TCP
+TargetPort:        10250/TCP
+Endpoints:         10.76.3.40:10250
+Session Affinity:  None
+Events:            <none>
 ```
 
-### Deploying an extension to a "garden" cluster
+It is listening on `443` while sending to `10250`, so you must pass `443` to `make start`.
+
+#### Start Extension
+
+Start the extension, which will start both the controller and the mutating webhook:
+
+```sh
+make start IGNORE_OPERATION_ANNOTATION=false WEBHOOK_CONFIG_MODE=service EXTENSION_NAMESPACE=<namespace> WEBHOOK_CONFIG_PORT=<port> WEBHOOK_CONFIG_SERICE_PORT=<service port>
+```
+
+For example:
+
+```sh
+make start IGNORE_OPERATION_ANNOTATION=false WEBHOOK_CONFIG_MODE=service EXTENSION_NAMESPACE=extension-provider-packet-9r7xh WEBHOOK_CONFIG_PORT=8443 WEBHOOK_CONFIG_SERICE_PORT=443
+```
+
+The option `IGNORE_OPERATION_ANNOTATION=false` is critically important. The annotation is how the gardenlet communicates with
+the extension controller. If it is set to `true` (the default), then shoots will not get reconciles by our extension.
+
+#### Webhook Tunnel
+
+```sh
+./hack/hook-me.sh packet extension-provider-packet-9r7xh 8443 10250
+```
+
+##### What the Webhook Does
+
+The Webhook mutates certain resources as they are applied to the cluster. Specifically, it focuses on configuring the elements that will
+be deployed to `Shoot` clusters. These include, but are not limited to:
+
+* `kube-controller-manager` - the one that will be started for the `Shoot`, actually running as a pod in the `Seed`, to have the correct `--cloud-provider` setting
+* `OperatingSystemConfig` - to have the correct configuration for the specific OS deployed on the cloud provider's nodes
+
+Full details on the webhooks is available [here](https://github.com/gardener/gardener/blob/master/docs/extensions/controlplane-webhooks.md).
+
+### Likely Errors
+
+When running the `hook-me.sh` or `make start`, here are some common errors.
+
+#### Bad Template
+
+`hook-me.sh` might give output as follows:
+
+```
+error: error executing template "{{ index (index  .status.loadBalancer.ingress 0).ip }}": template: output:1:10: executing "output" at <index .status.loadBalancer.ingress 0>: error calling index: index of untyped nil
+```
+
+If you already ran `make start`, just ignore it. This happens because the `hook-me.sh` is trying to get the load balancer IP
+assigned to the `inlets-lb` Service, but it hasn't been assigned yet. If you wait, this should clean itself up.
+
+#### Address Not Found
+
+`hook-me.sh` might give output as follows:
+
+```
+host: couldn'\''t get address for '\''executing'\'': not found
+```
+
+Again, this is likely a transient error. Wait until it passes.
+
+#### Inlets Pod Not Ready
+
+`hook-me.sh` gives output as follows:
+
+```
+++ kubectl -n extension-provider-packet-9r7xh get pods inlets-server --no-headers
+++ awk '{print $2}'
++ test 2/3 = 3/3
++ sleep 2s
+```
+
+Note that the number of ready pods given by `test 2/3` might also be `0/3` or `1/3`.
+
+To resolve this, you need to get the status of the `inlets-server` pod:
+
+```
+kubectl -n <namespace> describe pod inlets-server
+```
+
+For example:
+
+```
+kubectl -n extension-provider-packet-9r7xh describe pod inlets-server
+```
+
+Here you could find one of several errors:
+
+##### TLS Mount Failed
+
+```
+Type     Reason       Age                     From     Message
+----     ------       ----                    ----     -------
+Warning  FailedMount  28m (x5993 over 11d)    kubelet  Unable to attach or mount volumes: unmounted volumes=[inlets-tls], unattached volumes=[default-token-m8cwf inlets-tls]: timed out waiting for the condition
+Warning  FailedMount  8m30s (x1614 over 11d)  kubelet  Unable to attach or mount volumes: unmounted volumes=[inlets-tls], unattached volumes=[inlets-tls default-token-m8cwf]: timed out waiting for the condition
+Warning  FailedMount  4m17s (x8491 over 11d)  kubelet  MountVolume.SetUp failed for volume "inlets-tls" : secret "gardener-extension-webhook-cert" not found
+```
+
+This error likely is caused because you did not start the extension with the appropriate options, including `<namespace>`
+and `WEBHOOK_CONFIG_MODE=service`. These options set up the necessary certificate secrets.
+
+##### Inlets Not Found
+
+```
+  Warning  Failed     2m44s (x3 over 3m33s)  kubelet            Failed to pull image "inlets/inlets:2.6.3": rpc error: code = Unknown desc = Error response from daemon: pull access denied for inlets/inlets, repository does not exist or may require 'docker login': denied: requested access to the resource is denied
+```
+
+For unknown reasons, your cluster is unable to get inlets.
+
+
+
+
+### Deploying an extension to a soil cluster
 
 >NOTE: Some operations in the development workflow don't support Go modules. It is recommended to
 >clone the extension's source directory into your GOPATH.
@@ -211,8 +380,8 @@ git clone git@github.com:gardener/gardener-extension-provider-packet.git
 cd gardener-extension-provider-packet
 ```
 
-Set your `KUBECONFIG` env var to point at the kubeconfig file belonging to the **Gardener** API
-server (not the base API server). For a Gardener cluster deployed using
+Set your `KUBECONFIG` env var to point at the kubeconfig file belonging to the **garden cluster**
+(not the soil cluster). For a Gardener cluster deployed using
 [garden-setup](https://github.com/gardener/garden-setup), the command should be the following:
 
 ```
@@ -304,14 +473,30 @@ kubectl -n extension-provider-packet-xxxxx logs gardener-extension-provider-pack
 
 ### Miscellaneous and "gotchas"
 
+#### Helm chart packaging
+
 The Helm chart that is used by Gardener to deploy the extension controller is packaged as a
 **base64-encoded tgz archive** inline inside `example/controller-registration.yaml` under the
-`chart` field. To view its contents, run the following command:
+`chart` field. This entire yaml is generated when you run `make generate`.
+
+To view its contents, run the following command:
 
 ```
 cat example/controller-registration.yaml | grep chart | awk {'print $2'} | base64 -d | tar zxvf -
 ```
 
+#### Ignored files
 Some generated files are **gitignored**. To avoid building images using outdated generated data, be
 sure to **always** run `make generate` before running `make docker-images` (even when there is no
 visible Git diff).
+
+#### Retrying operations
+
+If shoot creation operations fail, you can restart them. See [here](https://github.com/gardener/gardener/blob/master/docs/usage/shoot_operations.md). For example, to retry a failed shoot creation:
+
+```
+$ kubectl -n garden-em annotate shoot em-test gardener.cloud/operation=retry
+shoot.core.gardener.cloud/em-test annotated
+```
+
+Remember that the shoot is in the _garden_ cluster, not the _soil_ cluster, so use the appropriate kubeconfig.

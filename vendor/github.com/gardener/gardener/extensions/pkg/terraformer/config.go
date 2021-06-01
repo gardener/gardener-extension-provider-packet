@@ -63,6 +63,12 @@ func (t *terraformer) SetDeadlinePod(d time.Duration) Terraformer {
 	return t
 }
 
+// SetDeadlinePodCreation configures the deadline while waiting for the creation of the Terraformer apply/destroy pod.
+func (t *terraformer) SetDeadlinePodCreation(d time.Duration) Terraformer {
+	t.deadlinePodCreation = d
+	return t
+}
+
 // SetOwnerRef configures the resource that will be used as owner of the secrets and configmaps
 func (t *terraformer) SetOwnerRef(owner *metav1.OwnerReference) Terraformer {
 	t.ownerRef = owner
@@ -131,7 +137,7 @@ func createOrUpdateConfigMap(ctx context.Context, c client.Client, namespace, na
 			Name:      name,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, c, configMap, func() error {
+	_, err := controllerutils.GetAndCreateOrStrategicMergePatch(ctx, c, configMap, func() error {
 		if configMap.Data == nil {
 			configMap.Data = make(map[string]string)
 		}
@@ -171,7 +177,7 @@ func CreateOrUpdateTFVarsSecret(ctx context.Context, c client.Client, namespace,
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, c, secret, func() error {
+	_, err := controllerutils.GetAndCreateOrStrategicMergePatch(ctx, c, secret, func() error {
 		if secret.Data == nil {
 			secret.Data = make(map[string][]byte)
 		}

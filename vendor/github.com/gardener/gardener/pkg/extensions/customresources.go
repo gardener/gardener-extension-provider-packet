@@ -16,24 +16,8 @@ package extensions
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"reflect"
 	"time"
-
-	gardencorev1alpha1 "github.com/gardener/gardener/pkg/apis/core/v1alpha1"
-	gardencorev1alpha1helper "github.com/gardener/gardener/pkg/apis/core/v1alpha1/helper"
-	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
-	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
-	gardencorev1beta1helper "github.com/gardener/gardener/pkg/apis/core/v1beta1/helper"
-	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
-	"github.com/gardener/gardener/pkg/utils"
-	"github.com/gardener/gardener/pkg/utils/flow"
-	gutil "github.com/gardener/gardener/pkg/utils/gardener"
-	kutil "github.com/gardener/gardener/pkg/utils/kubernetes"
-	"github.com/gardener/gardener/pkg/utils/kubernetes/health"
-	"github.com/gardener/gardener/pkg/utils/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	"github.com/sirupsen/logrus"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
@@ -41,6 +25,19 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	gardencorev1alpha1 "github.com/gardener/gardener/pkg/apis/core/v1alpha1"
+	gardencorev1alpha1helper "github.com/gardener/gardener/pkg/apis/core/v1alpha1/helper"
+	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
+	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
+	gardencorev1beta1helper "github.com/gardener/gardener/pkg/apis/core/v1beta1/helper"
+	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
+	"github.com/gardener/gardener/pkg/utils/flow"
+	gutil "github.com/gardener/gardener/pkg/utils/gardener"
+	kutil "github.com/gardener/gardener/pkg/utils/kubernetes"
+	"github.com/gardener/gardener/pkg/utils/kubernetes/health"
+	unstructuredutils "github.com/gardener/gardener/pkg/utils/kubernetes/unstructured"
+	"github.com/gardener/gardener/pkg/utils/retry"
 )
 
 // TimeNow returns the current time. Exposed for testing.
@@ -60,24 +57,11 @@ func WaitUntilExtensionObjectReady(
 	timeout time.Duration,
 	postReadyFunc func() error,
 ) error {
-	var healthFuncs []health.Func
-
-	// If the extension object has been reconciled successfully before we triggered a new reconciliation and our cache
-	// is not updated fast enough with our reconciliation trigger (i.e. adding the reconcile annotation), we might
-	// falsy return early from waiting for the extension object to be ready (as the last state already was "ready").
-	// Use the timestamp annotation on the object as an ensurance, that once we see it in our cache, we are observing
-	// a version of the object that is fresh enough.
-	if expectedTimestamp, ok := obj.GetAnnotations()[v1beta1constants.GardenerTimestamp]; ok {
-		healthFuncs = append(healthFuncs, health.ObjectHasAnnotationWithValue(v1beta1constants.GardenerTimestamp, expectedTimestamp))
-	}
-
-	healthFuncs = append(healthFuncs, health.CheckExtensionObject)
-
 	return WaitUntilObjectReadyWithHealthFunction(
 		ctx,
 		c,
 		logger,
-		health.And(healthFuncs...),
+		health.CheckExtensionObject,
 		obj,
 		kind,
 		interval,
@@ -104,7 +88,6 @@ func WaitUntilObjectReadyWithHealthFunction(
 	postReadyFunc func() error,
 ) error {
 	var (
-		errorWithCode         *gardencorev1beta1helper.ErrorWithCodes
 		lastObservedError     error
 		retryCountUntilSevere int
 
@@ -112,7 +95,16 @@ func WaitUntilObjectReadyWithHealthFunction(
 		namespace = obj.GetNamespace()
 	)
 
-	resetObj, err := createResetObjectFunc(obj, c.Scheme())
+	// If the object has been reconciled successfully before we triggered a new reconciliation and our cache
+	// is not updated fast enough with our reconciliation trigger (i.e. adding the reconcile annotation), we might
+	// falsy return early from waiting for the object to be ready (as the last state already was "ready").
+	// Use the timestamp annotation on the object as an ensurance, that once we see it in our cache, we are observing
+	// a version of the object that is fresh enough.
+	if expectedTimestamp, ok := obj.GetAnnotations()[v1beta1constants.GardenerTimestamp]; ok {
+		healthFunc = health.And(health.ObjectHasAnnotationWithValue(v1beta1constants.GardenerTimestamp, expectedTimestamp), healthFunc)
+	}
+
+	resetObj, err := kutil.CreateResetObjectFunc(obj, c.Scheme())
 	if err != nil {
 		return err
 	}
@@ -121,7 +113,9 @@ func WaitUntilObjectReadyWithHealthFunction(
 		retryCountUntilSevere++
 
 		resetObj()
-		if err := c.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, obj); err != nil {
+		obj.SetName(name)
+		obj.SetNamespace(namespace)
+		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
 			if apierrors.IsNotFound(err) {
 				return retry.MinorError(err)
 			}
@@ -131,7 +125,7 @@ func WaitUntilObjectReadyWithHealthFunction(
 		if err := healthFunc(obj); err != nil {
 			lastObservedError = err
 			logger.WithError(err).Errorf("%s did not get ready yet", extensionKey(kind, namespace, name))
-			if errors.As(err, &errorWithCode) {
+			if retry.IsRetriable(err) {
 				return retry.MinorOrSevereError(retryCountUntilSevere, int(severeThreshold.Nanoseconds()/interval.Nanoseconds()), err)
 			}
 			return retry.MinorError(err)
@@ -147,9 +141,9 @@ func WaitUntilObjectReadyWithHealthFunction(
 	}); err != nil {
 		message := fmt.Sprintf("Error while waiting for %s to become ready", extensionKey(kind, namespace, name))
 		if lastObservedError != nil {
-			return gardencorev1beta1helper.NewErrorWithCodes(formatErrorMessage(message, lastObservedError.Error()), gardencorev1beta1helper.ExtractErrorCodes(lastObservedError)...)
+			return fmt.Errorf("%s: %w", message, lastObservedError)
 		}
-		return errors.New(formatErrorMessage(message, err.Error()))
+		return fmt.Errorf("%s: %w", message, err)
 	}
 
 	return nil
@@ -265,14 +259,16 @@ func WaitUntilExtensionObjectDeleted(
 		namespace = obj.GetNamespace()
 	)
 
-	resetObj, err := createResetObjectFunc(obj, c.Scheme())
+	resetObj, err := kutil.CreateResetObjectFunc(obj, c.Scheme())
 	if err != nil {
 		return err
 	}
 
 	if err := retry.UntilTimeout(ctx, interval, timeout, func(ctx context.Context) (bool, error) {
 		resetObj()
-		if err := c.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, obj); err != nil {
+		obj.SetName(name)
+		obj.SetNamespace(namespace)
+		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
 			if apierrors.IsNotFound(err) {
 				return retry.Ok()
 			}
@@ -292,9 +288,9 @@ func WaitUntilExtensionObjectDeleted(
 	}); err != nil {
 		message := fmt.Sprintf("Failed to delete %s", extensionKey(kind, namespace, name))
 		if lastObservedError != nil {
-			return gardencorev1beta1helper.NewErrorWithCodes(formatErrorMessage(message, lastObservedError.Error()), gardencorev1beta1helper.ExtractErrorCodes(lastObservedError)...)
+			return fmt.Errorf("%s: %w", message, lastObservedError)
 		}
-		return errors.New(formatErrorMessage(message, err.Error()))
+		return fmt.Errorf("%s: %w", message, err)
 	}
 
 	return nil
@@ -335,7 +331,7 @@ func RestoreExtensionObjectState(
 		purpose := extensionObj.GetExtensionSpec().GetExtensionPurpose()
 		list := gardencorev1alpha1helper.ExtensionResourceStateList(shootState.Spec.Extensions)
 		if extensionResourceState := list.Get(kind, &resourceName, purpose); extensionResourceState != nil {
-			patch := client.MergeFrom(extensionObj.DeepCopyObject())
+			patch := client.MergeFrom(extensionObj.DeepCopyObject().(client.Object))
 			extensionStatus := extensionObj.GetExtensionStatus()
 			extensionStatus.SetState(extensionResourceState.State)
 			extensionStatus.SetResources(extensionResourceState.Resources)
@@ -358,7 +354,7 @@ func RestoreExtensionObjectState(
 				if err != nil {
 					return err
 				}
-				if err := utils.CreateOrUpdateObjectByRef(ctx, c, &resourceRef, extensionObj.GetNamespace(), obj); err != nil {
+				if err := unstructuredutils.CreateOrPatchObjectByRef(ctx, c, &resourceRef, extensionObj.GetNamespace(), obj); err != nil {
 					return err
 				}
 			}
@@ -410,14 +406,16 @@ func WaitUntilExtensionObjectMigrated(
 		namespace = obj.GetNamespace()
 	)
 
-	resetObj, err := createResetObjectFunc(obj, c.Scheme())
+	resetObj, err := kutil.CreateResetObjectFunc(obj, c.Scheme())
 	if err != nil {
 		return err
 	}
 
 	return retry.UntilTimeout(ctx, interval, timeout, func(ctx context.Context) (done bool, err error) {
 		resetObj()
-		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, obj); err != nil {
+		obj.SetName(name)
+		obj.SetNamespace(namespace)
+		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
 			if client.IgnoreNotFound(err) == nil {
 				return retry.Ok()
 			}
@@ -467,7 +465,7 @@ func WaitUntilExtensionObjectsMigrated(
 
 // AnnotateObjectWithOperation annotates the object with the provided operation annotation value.
 func AnnotateObjectWithOperation(ctx context.Context, w client.Writer, obj client.Object, operation string) error {
-	patch := client.MergeFrom(obj.DeepCopyObject())
+	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
 	kutil.SetMetaDataAnnotation(obj, v1beta1constants.GardenerOperation, operation)
 	kutil.SetMetaDataAnnotation(obj, v1beta1constants.GardenerTimestamp, TimeNow().UTC().String())
 	return w.Patch(ctx, obj, patch)
@@ -511,33 +509,4 @@ func applyFuncToExtensionObjects(
 
 func extensionKey(kind, namespace, name string) string {
 	return fmt.Sprintf("%s %s/%s", kind, namespace, name)
-}
-
-func formatErrorMessage(message, description string) string {
-	return fmt.Sprintf("%s: %s", message, description)
-}
-
-// createResetObjectFunc creates a func that will reset the given object to a new empty object every time the func is called.
-// This is useful for resetting an in-memory object before re-getting it from the API server / cache
-// to avoid executing checks on stale/removed object data e.g. annotations/lastError
-// (json decoder does not unset fields in the in-memory object that are unset in the API server's response)
-func createResetObjectFunc(obj runtime.Object, scheme *runtime.Scheme) (func(), error) {
-	gvk, err := apiutil.GVKForObject(obj, scheme)
-	if err != nil {
-		return nil, err
-	}
-	emptyObj, err := scheme.New(gvk)
-	if err != nil {
-		return nil, err
-	}
-	return func() {
-		deepCopyIntoObject(obj, emptyObj)
-	}, nil
-}
-
-// deepCopyIntoObject deep copies src into dest.
-// This is a workaround for runtime.Object's lack of a DeepCopyInto method, similar to what the c-r cache does:
-// https://github.com/kubernetes-sigs/controller-runtime/blob/55a329c15d6b4f91a9ff072fed6f6f05ff3339e7/pkg/cache/internal/cache_reader.go#L85-L90
-func deepCopyIntoObject(dest, src runtime.Object) {
-	reflect.ValueOf(dest).Elem().Set(reflect.ValueOf(src.DeepCopyObject()).Elem())
 }

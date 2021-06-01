@@ -39,3 +39,7 @@ spec:
       versions:
       - version: 0.0.0-stable
         id: flatcar_stable
+    - name: ubuntu
+      versions:
+      - version: "20.04"
+        id: ubuntu_20_04
