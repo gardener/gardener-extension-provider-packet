@@ -18,6 +18,7 @@ import (
 	"context"
 
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
+	operationsv1alpha1 "github.com/gardener/gardener/pkg/apis/operations/v1alpha1"
 	seedmanagementv1alpha1 "github.com/gardener/gardener/pkg/apis/seedmanagement/v1alpha1"
 	gardencorelisters "github.com/gardener/gardener/pkg/client/core/listers/core/v1beta1"
 	"github.com/gardener/gardener/pkg/gardenlet/apis/config"
@@ -76,7 +77,7 @@ func ShootFilterFunc(seedName string, seedLister gardencorelisters.SeedLister, l
 }
 
 // ShootIsManagedByThisGardenlet checks if the given shoot is managed by this gardenlet by comparing it with the seed name from the GardenletConfiguration
-// or by checking whether the seed labels mathes the seed seoector from the GardenletConfiguration.
+// or by checking whether the seed labels match the seed selector from the GardenletConfiguration.
 func ShootIsManagedByThisGardenlet(shoot *gardencorev1beta1.Shoot, gc *config.GardenletConfiguration, seedLister gardencorelisters.SeedLister) bool {
 	seedName := confighelper.SeedNameFromSeedConfig(gc.SeedConfig)
 	if len(seedName) > 0 {
@@ -98,7 +99,7 @@ func SeedLabelsMatch(seedLister gardencorelisters.SeedLister, seedName string, l
 
 // seedLabelsMatchWithClient fetches the given seed by its name from the client and then checks whether the given
 // label selector matches the seed labels.
-func seedLabelsMatchWithClient(ctx context.Context, c client.Client, seedName string, labelSelector *metav1.LabelSelector) bool {
+func seedLabelsMatchWithClient(ctx context.Context, c client.Reader, seedName string, labelSelector *metav1.LabelSelector) bool {
 	seed := &gardencorev1beta1.Seed{}
 	if err := c.Get(ctx, client.ObjectKey{Name: seedName}, seed); err != nil {
 		return false
@@ -149,10 +150,53 @@ func BackupEntryFilterFunc(ctx context.Context, c client.Client, seedName string
 			return false
 		}
 		if len(seedName) > 0 {
-			return *backupEntry.Spec.SeedName == seedName
+			if backupEntry.Status.SeedName == nil || *backupEntry.Spec.SeedName == *backupEntry.Status.SeedName {
+				return *backupEntry.Spec.SeedName == seedName
+			}
+			return *backupEntry.Status.SeedName == seedName
 		}
-		return seedLabelsMatchWithClient(ctx, c, *backupEntry.Spec.SeedName, labelSelector)
+		if backupEntry.Status.SeedName == nil || *backupEntry.Spec.SeedName == *backupEntry.Status.SeedName {
+			return seedLabelsMatchWithClient(ctx, c, *backupEntry.Spec.SeedName, labelSelector)
+		}
+		return seedLabelsMatchWithClient(ctx, c, *backupEntry.Status.SeedName, labelSelector)
 	}
+}
+
+// BackupEntryIsManagedByThisGardenlet checks if the given BackupEntry is managed by this gardenlet by comparing it with the seed name from the GardenletConfiguration
+// or by checking whether the seed labels match the seed selector from the GardenletConfiguration.
+func BackupEntryIsManagedByThisGardenlet(ctx context.Context, c client.Client, backupEntry *gardencorev1beta1.BackupEntry, gc *config.GardenletConfiguration) bool {
+	seedName := confighelper.SeedNameFromSeedConfig(gc.SeedConfig)
+	if len(seedName) > 0 {
+		return backupEntry.Spec.SeedName != nil && *backupEntry.Spec.SeedName == seedName
+	}
+	return seedLabelsMatchWithClient(ctx, c, *backupEntry.Spec.SeedName, gc.SeedSelector)
+}
+
+// BastionFilterFunc returns a filtering func for the seeds and the given label selector.
+func BastionFilterFunc(ctx context.Context, c client.Client, seedName string, labelSelector *metav1.LabelSelector) func(obj interface{}) bool {
+	return func(obj interface{}) bool {
+		bastion, ok := obj.(*operationsv1alpha1.Bastion)
+		if !ok {
+			return false
+		}
+		if bastion.Spec.SeedName == nil {
+			return false
+		}
+		if len(seedName) > 0 {
+			return *bastion.Spec.SeedName == seedName
+		}
+		return seedLabelsMatchWithClient(ctx, c, *bastion.Spec.SeedName, labelSelector)
+	}
+}
+
+// BastionIsManagedByThisGardenlet checks if the given Bastion is managed by this gardenlet by comparing it with the seed name from the GardenletConfiguration
+// or by checking whether the seed labels match the seed selector from the GardenletConfiguration.
+func BastionIsManagedByThisGardenlet(ctx context.Context, c client.Client, bastion *operationsv1alpha1.Bastion, gc *config.GardenletConfiguration) bool {
+	seedName := confighelper.SeedNameFromSeedConfig(gc.SeedConfig)
+	if len(seedName) > 0 {
+		return bastion.Spec.SeedName != nil && *bastion.Spec.SeedName == seedName
+	}
+	return seedLabelsMatchWithClient(ctx, c, *bastion.Spec.SeedName, gc.SeedSelector)
 }
 
 // ManagedSeedFilterFunc returns a filtering func for ManagedSeeds that checks if the ManagedSeed references a Shoot scheduled on a Seed, for which the gardenlet is responsible..

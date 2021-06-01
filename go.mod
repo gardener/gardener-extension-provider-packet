@@ -1,5 +1,6 @@
 module github.com/gardener/gardener-extension-provider-packet
 
+// must use 1.16.1 or higher because of https://github.com/golang/go/issues/43985
 go 1.16
 
 require (
@@ -7,8 +8,8 @@ require (
 	github.com/ahmetb/gen-crd-api-reference-docs v0.2.0
 	github.com/coreos/go-systemd/v22 v22.1.0
 	github.com/frankban/quicktest v1.9.0 // indirect
-	github.com/gardener/etcd-druid v0.3.0
-	github.com/gardener/gardener v1.21.0
+	github.com/gardener/etcd-druid v0.5.0
+	github.com/gardener/gardener v1.24.1-0.20210601160151-4d17f76ab657
 	github.com/gardener/machine-controller-manager v0.36.0
 	github.com/go-logr/logr v0.3.0
 	github.com/golang/mock v1.5.0
@@ -23,14 +24,14 @@ require (
 	github.com/spf13/cobra v1.1.1
 	github.com/spf13/pflag v1.0.5
 	github.com/ulikunitz/xz v0.5.7 // indirect
-	k8s.io/api v0.20.2
-	k8s.io/apiextensions-apiserver v0.20.2
-	k8s.io/apimachinery v0.20.2
-	k8s.io/apiserver v0.20.2
+	k8s.io/api v0.20.7
+	k8s.io/apiextensions-apiserver v0.20.7
+	k8s.io/apimachinery v0.20.7
+	k8s.io/apiserver v0.20.7
 	k8s.io/client-go v11.0.1-0.20190409021438-1a26190bd76a+incompatible
-	k8s.io/code-generator v0.20.2
-	k8s.io/component-base v0.20.2
-	k8s.io/kubelet v0.20.2
+	k8s.io/code-generator v0.20.7
+	k8s.io/component-base v0.20.7
+	k8s.io/kubelet v0.20.7
 	k8s.io/utils v0.0.0-20210111153108-fddb29f9d009
 	sigs.k8s.io/controller-runtime v0.8.3
 )
